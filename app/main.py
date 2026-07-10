@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config.settings import settings
+from app.api.v1.endpoints.auth import router as auth_router
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -18,12 +19,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register routers
+app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
+
 @app.get("/health", tags=["Health"])
 async def health_check():
     """
     Liveness and readiness check.
     """
-    print("prajwal", settings)
     return {
         "status": "healthy",
         "project": settings.PROJECT_NAME,
