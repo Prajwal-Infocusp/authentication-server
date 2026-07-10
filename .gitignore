@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment configurations and secrets
+.env
+.env.*
+!.env.example
+
+# IDE configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Alembic cache
+alembic/versions/__pycache__/
+
+# Testing and Coverage
+.pytest_cache/
+.coverage
+htmlcov/
