@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, TYPE_CHECKING
 from sqlalchemy import String, Boolean, text, DateTime
 from sqlalchemy.dialects.postgresql import UUID
@@ -36,12 +36,15 @@ class User(Base):
         nullable=False,
         server_default=text("TIMEZONE('utc', NOW())"),
     )
+    # onupdate runs on the Python/ORM side and produces a timezone-aware UTC
+    # timestamp, consistent with the rest of the codebase. (A bare
+    # server_onupdate would not fire on UPDATE without a DB trigger, so it is
+    # intentionally omitted.)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("TIMEZONE('utc', NOW())"),
-        onupdate=datetime.utcnow,
-        server_onupdate=text("TIMEZONE('utc', NOW())"),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
 
     # Relationships (one-to-many, cascade delete)

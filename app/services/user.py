@@ -1,7 +1,8 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.db.models.user import User
+from app.db.repositories.user import UserRepository
 from app.schemas.user import UserRegister
 from app.security.password import hash_password
 
@@ -16,26 +17,24 @@ class EmailAlreadyRegisteredError(Exception):
 class UserService:
     def __init__(self, db: AsyncSession):
         self.db = db
-
-    async def get_user_by_email(self, email: str) -> User | None:
-        """
-        Retrieves a user by their email address.
-        """
-        stmt = select(User).where(User.email == email)
-        result = await self.db.execute(stmt)
-        return result.scalar_one_or_none()
+        self.user_repo = UserRepository(db)
 
     async def register_user(self, user_data: UserRegister) -> User:
         """
         Registers a new user in the database.
-        
+
         Flow:
         1. Check if email exists -> raise EmailAlreadyRegisteredError
         2. Hash password using bcrypt
         3. Save to database, commit, refresh, and return
+
+        The unique constraint on users.email is also enforced at the database
+        level: if two requests race past the existence check, the losing insert
+        raises IntegrityError, which is translated into EmailAlreadyRegisteredError
+        (409) rather than surfacing as a generic 500.
         """
         # 1. Check if user already exists
-        existing_user = await self.get_user_by_email(user_data.email)
+        existing_user = await self.user_repo.get_by_email(user_data.email)
         if existing_user:
             raise EmailAlreadyRegisteredError()
 
@@ -51,10 +50,14 @@ class UserService:
 
         # 4. Insert and commit
         try:
-            self.db.add(new_user)
+            await self.user_repo.create(new_user)
             await self.db.commit()
             await self.db.refresh(new_user)
             return new_user
+        except IntegrityError:
+            # Lost a race with a concurrent registration of the same email.
+            await self.db.rollback()
+            raise EmailAlreadyRegisteredError()
         except Exception as e:
             await self.db.rollback()
             raise e

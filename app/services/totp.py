@@ -188,9 +188,19 @@ class TOTPService:
         if not user or not user.is_2fa_enabled or not user.totp_secret:
             raise InvalidLoginTokenError()
 
-        # 3. Verify TOTP code
+        # 3. Verify TOTP code. On failure, record the attempt and invalidate the
+        #    login token once the allowed number of attempts is exhausted, so a
+        #    single token cannot be used to brute-force the 6-digit TOTP code.
         totp = pyotp.TOTP(user.totp_secret)
         if not totp.verify(code):
+            attempts = await self.token_repo.increment_login_token_attempts(login_token)
+            if attempts >= settings.MAX_LOGIN_TOKEN_ATTEMPTS:
+                await self.token_repo.mark_login_token_used(login_token)
+            try:
+                await self.db.commit()
+            except Exception as e:
+                await self.db.rollback()
+                raise e
             raise InvalidTOTPCodeError()
 
         # 4. Success -> Mark token as used, issue JWT & refresh tokens

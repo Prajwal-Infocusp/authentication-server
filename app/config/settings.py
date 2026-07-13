@@ -50,4 +50,8 @@ class Settings(BaseSettings):
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
 
+    # Maximum number of failed TOTP verifications allowed per login token
+    # before it is invalidated (mitigates 2FA code brute-forcing).
+    MAX_LOGIN_TOKEN_ATTEMPTS: int = 5
+
 settings = Settings()

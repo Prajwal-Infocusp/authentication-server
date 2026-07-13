@@ -61,6 +61,9 @@ class AuthService:
             expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
 
             try:
+                # Keep at most one active login token per user so the number of
+                # TOTP guesses an attacker can obtain is bounded.
+                await self.token_repo.invalidate_unused_login_tokens(user.id)
                 await self.token_repo.create_login_token(
                     user_id=user.id,
                     token_hash=hashed_login_token,

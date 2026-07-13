@@ -1,47 +1,6 @@
 import pytest
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
-from app.main import app
-from app.db.database import get_db
-from app.config.settings import settings
-
-# Setup a test async engine and session factory
-test_engine = create_async_engine(settings.ASYNC_DATABASE_URL, echo=False)
-TestSessionLocal = async_sessionmaker(
-    bind=test_engine,
-    expire_on_commit=False,
-    autocommit=False,
-    autoflush=False
-)
-
-
-@pytest.fixture(scope="function")
-async def db_session():
-    """
-    Fixture that yields an AsyncSession inside a rolled-back transaction.
-    This guarantees that test data is never persisted to the database.
-    """
-    async with test_engine.begin() as conn:
-        session = TestSessionLocal(bind=conn)
-        yield session
-        await session.close()
-        await conn.rollback()  # Rollback transaction to clean up test data
-
-
-@pytest.fixture(scope="function")
-async def client(db_session):
-    """
-    Fixture that returns an AsyncClient with the get_db dependency overridden.
-    """
-    async def override_get_db():
-        yield db_session
-
-    app.dependency_overrides[get_db] = override_get_db
-    # In modern HTTPX, we use ASGITransport to point to the ASGI app
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        yield c
-    app.dependency_overrides.clear()
+# Shared fixtures (db_session, client) live in tests/conftest.py.
 
 
 @pytest.mark.asyncio

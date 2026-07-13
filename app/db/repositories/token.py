@@ -52,6 +52,28 @@ class TokenRepository:
         """
         login_token.used_at = datetime.now(timezone.utc)
 
+    async def increment_login_token_attempts(self, login_token: LoginToken) -> int:
+        """
+        Increments the failed-verification counter on a login token and returns
+        the new value.
+        """
+        login_token.attempts = (login_token.attempts or 0) + 1
+        return login_token.attempts
+
+    async def invalidate_unused_login_tokens(self, user_id: uuid.UUID) -> None:
+        """
+        Marks all of a user's currently-unused login tokens as used. Called when
+        issuing a fresh login token so at most one login token is ever active
+        per user, bounding the number of TOTP guesses an attacker can make.
+        """
+        stmt = (
+            update(LoginToken)
+            .where(LoginToken.user_id == user_id)
+            .where(LoginToken.used_at.is_(None))
+            .values(used_at=datetime.now(timezone.utc))
+        )
+        await self.db.execute(stmt)
+
     async def create_or_update_pending_totp_setup(
         self, user_id: uuid.UUID, secret: str, expires_at: datetime
     ) -> PendingTOTPSetup:
