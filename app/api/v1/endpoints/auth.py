@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +15,12 @@ from app.schemas.auth import (
     LogoutRequest,
     MessageResponse,
 )
-from app.schemas.totp import TOTPSetupResponse, TOTPEnableRequest, TOTPVerifyRequest
+from app.schemas.totp import (
+    TOTPSetupResponse,
+    TOTPEnableRequest,
+    TOTPVerifyRequest,
+    TOTPDisableRequest,
+)
 from app.services.user import UserService, EmailAlreadyRegisteredError
 from app.services.auth import (
     AuthService,
@@ -31,6 +38,9 @@ from app.services.totp import (
     InvalidLoginTokenError,
     ExpiredLoginTokenError,
     LoginTokenAlreadyUsedError,
+    MFANotEnabledError,
+    InvalidPasswordError,
+    TwoFactorLockedError,
 )
 
 router = APIRouter()
@@ -200,6 +210,54 @@ async def verify_2fa(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred during 2FA verification.",
+        )
+
+
+@router.post("/2fa/disable", response_model=MessageResponse, status_code=status.HTTP_200_OK)
+async def disable_2fa(
+    payload: TOTPDisableRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Endpoint to disable two-factor authentication. Requires a step-up
+    re-verification: the account password AND a current TOTP code. Repeated
+    wrong codes lock the action temporarily. On success the TOTP secret is
+    cleared and all refresh tokens are revoked (symmetric with enabling 2FA),
+    so every session must log in again.
+    """
+    totp_service = TOTPService(db)
+    try:
+        await totp_service.disable_2fa(current_user, payload.password, payload.code)
+        return {
+            "message": "Two-factor authentication disabled successfully. Existing refresh tokens have been revoked."
+        }
+    except MFANotEnabledError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Two-factor authentication is not enabled.",
+        )
+    except InvalidPasswordError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid password.",
+        )
+    except TwoFactorLockedError as exc:
+        retry_after = max(1, int((exc.locked_until - datetime.now(timezone.utc)).total_seconds()))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    except InvalidTOTPCodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid two-factor authentication code.",
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while disabling 2FA.",
         )
 
 

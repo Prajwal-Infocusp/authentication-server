@@ -13,6 +13,7 @@ from app.db.repositories.user import UserRepository
 from app.db.repositories.token import TokenRepository
 from app.db.models.user import User
 from app.security.jwt import create_access_token
+from app.security.password import verify_password
 
 
 class MFAAlreadyEnabledError(Exception):
@@ -62,6 +63,30 @@ class LoginTokenAlreadyUsedError(Exception):
     Raised when trying to use a login token that has already been consumed.
     """
     pass
+
+
+class MFANotEnabledError(Exception):
+    """
+    Raised when attempting to disable 2FA for a user who does not have it enabled.
+    """
+    pass
+
+
+class InvalidPasswordError(Exception):
+    """
+    Raised when the password supplied to confirm a sensitive action is wrong.
+    """
+    pass
+
+
+class TwoFactorLockedError(Exception):
+    """
+    Raised when 2FA verification is temporarily locked after too many failed
+    attempts. Carries the UTC time at which the lock lifts.
+    """
+    def __init__(self, locked_until):
+        self.locked_until = locked_until
+        super().__init__("Two-factor authentication is temporarily locked.")
 
 
 class TOTPService:
@@ -230,3 +255,80 @@ class TOTPService:
             "token_type": "Bearer",
             "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         }
+
+    async def disable_2fa(self, user: User, password: str, code: str) -> None:
+        """
+        Disables 2FA for a user after a step-up re-verification:
+        1. Confirm 2FA is currently enabled.
+        2. Confirm the account password.
+        3. Enforce the failed-attempt lockout (brute-force protection).
+        4. Verify the TOTP code:
+           - On failure: record the attempt (with time-decay of stale
+             failures) and lock the action once the cap is reached.
+           - On success: reset the attempt counter, clear the TOTP secret,
+             flip is_2fa_enabled off, remove any pending setup, and revoke all
+             refresh tokens (symmetric with enabling 2FA).
+        """
+        if not user.is_2fa_enabled:
+            raise MFANotEnabledError()
+
+        if not verify_password(password, user.password_hash):
+            raise InvalidPasswordError()
+
+        now = datetime.now(timezone.utc)
+        window = timedelta(minutes=settings.MFA_DISABLE_LOCKOUT_MINUTES)
+        attempt = await self.token_repo.get_two_factor_attempt(user.id)
+
+        # Lockout check
+        if attempt and attempt.locked_until and attempt.locked_until > now:
+            raise TwoFactorLockedError(attempt.locked_until)
+
+        code_ok = bool(user.totp_secret) and pyotp.TOTP(user.totp_secret).verify(code)
+
+        if not code_ok:
+            if attempt is None:
+                attempt = await self.token_repo.create_two_factor_attempt(user.id)
+
+            # Time-decay: forget failures older than the window before counting.
+            if attempt.last_failed_at is None or (now - attempt.last_failed_at) > window:
+                attempt.failed_attempts = 0
+
+            attempt.failed_attempts += 1
+            attempt.last_failed_at = now
+
+            newly_locked = attempt.failed_attempts >= settings.MFA_DISABLE_MAX_ATTEMPTS
+            if newly_locked:
+                attempt.locked_until = now + window
+
+            try:
+                await self.db.commit()
+            except Exception as e:
+                await self.db.rollback()
+                raise e
+
+            if newly_locked:
+                raise TwoFactorLockedError(attempt.locked_until)
+            raise InvalidTOTPCodeError()
+
+        # Success: reset the counter and disable 2FA.
+        if attempt:
+            attempt.failed_attempts = 0
+            attempt.locked_until = None
+            attempt.last_failed_at = None
+
+        user.is_2fa_enabled = False
+        user.totp_secret = None
+
+        pending_setup = await self.token_repo.get_pending_totp_setup(user.id)
+        if pending_setup:
+            await self.token_repo.delete_pending_totp_setup(pending_setup)
+
+        # Security-state change -> force all sessions to re-authenticate,
+        # mirroring what enabling 2FA does.
+        await self.token_repo.revoke_user_refresh_tokens(user.id)
+
+        try:
+            await self.db.commit()
+        except Exception as e:
+            await self.db.rollback()
+            raise e

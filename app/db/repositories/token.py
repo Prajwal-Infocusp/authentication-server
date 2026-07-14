@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
-from app.db.models.token import RefreshToken, LoginToken, PendingTOTPSetup
+from app.db.models.token import RefreshToken, LoginToken, PendingTOTPSetup, TwoFactorAttempt
 
 
 class TokenRepository:
@@ -140,3 +140,19 @@ class TokenRepository:
             .values(revoked_at=datetime.now(timezone.utc))
         )
         await self.db.execute(stmt)
+
+    async def get_two_factor_attempt(self, user_id: uuid.UUID) -> TwoFactorAttempt | None:
+        """
+        Retrieves the 2FA attempt-tracking row for a user, if one exists.
+        """
+        stmt = select(TwoFactorAttempt).where(TwoFactorAttempt.user_id == user_id)
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def create_two_factor_attempt(self, user_id: uuid.UUID) -> TwoFactorAttempt:
+        """
+        Creates a fresh 2FA attempt-tracking row for a user.
+        """
+        row = TwoFactorAttempt(user_id=user_id)
+        self.db.add(row)
+        return row

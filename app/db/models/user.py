@@ -8,7 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
-    from app.db.models.token import RefreshToken, EmailVerificationToken, PasswordResetToken, LoginToken, PendingTOTPSetup
+    from app.db.models.token import RefreshToken, EmailVerificationToken, PasswordResetToken, LoginToken, PendingTOTPSetup, TwoFactorAttempt
 
 
 class User(Base):
@@ -74,6 +74,13 @@ class User(Base):
     )
     pending_totp_setup: Mapped[Optional["PendingTOTPSetup"]] = relationship(
         "PendingTOTPSetup",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
+    two_factor_attempt: Mapped[Optional["TwoFactorAttempt"]] = relationship(
+        "TwoFactorAttempt",
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,

@@ -54,4 +54,11 @@ class Settings(BaseSettings):
     # before it is invalidated (mitigates 2FA code brute-forcing).
     MAX_LOGIN_TOKEN_ATTEMPTS: int = 5
 
+    # 2FA-disable brute-force protection: after this many consecutive failed
+    # TOTP codes the disable action is locked for the cooldown period. The
+    # cooldown also doubles as the decay window - failures older than it are
+    # forgotten before the counter is incremented.
+    MFA_DISABLE_MAX_ATTEMPTS: int = 5
+    MFA_DISABLE_LOCKOUT_MINUTES: int = 15
+
 settings = Settings()

@@ -118,6 +118,44 @@ class LoginToken(Base):
     user: Mapped["User"] = relationship("User", back_populates="login_tokens")
 
 
+class TwoFactorAttempt(Base):
+    """
+    Tracks failed 2FA (TOTP) verification attempts per user for the
+    2FA-disable flow, enabling a lockout after too many failures. One row
+    per user (created lazily on the first failure).
+    """
+    __tablename__ = "two_factor_attempts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+    failed_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    locked_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_failed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("TIMEZONE('utc', NOW())"),
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="two_factor_attempt")
+
+
 class PendingTOTPSetup(Base):
     __tablename__ = "pending_totp_setups"
 
