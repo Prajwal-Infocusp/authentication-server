@@ -18,6 +18,28 @@ class InvalidCredentialsError(Exception):
     pass
 
 
+class InvalidRefreshTokenError(Exception):
+    """
+    Raised when a refresh token does not exist or its user is missing.
+    """
+    pass
+
+
+class ExpiredRefreshTokenError(Exception):
+    """
+    Raised when a refresh token has passed its expiration time.
+    """
+    pass
+
+
+class RevokedRefreshTokenError(Exception):
+    """
+    Raised when a refresh token has already been revoked (e.g. rotated out,
+    logged out, or invalidated when 2FA was enabled).
+    """
+    pass
+
+
 class AuthService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -105,3 +127,93 @@ class AuthService:
                 "token_type": "Bearer",
                 "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
             }
+
+    async def refresh(self, refresh_token_plain: str) -> Dict[str, Any]:
+        """
+        Exchanges a valid refresh token for a new access token, rotating the
+        refresh token in the process:
+        1. Look up the refresh token by its hash.
+        2. Reject if missing, revoked, or expired.
+        3. Confirm the owning user still exists.
+        4. Revoke the presented token and issue a brand-new access + refresh
+           token pair (rotation), so a refresh token is single-use.
+        """
+        token_hash = self._hash_token(refresh_token_plain)
+        db_token = await self.token_repo.get_refresh_token_by_hash(token_hash)
+
+        if not db_token:
+            raise InvalidRefreshTokenError()
+        if db_token.revoked_at is not None:
+            raise RevokedRefreshTokenError()
+        if datetime.now(timezone.utc) > db_token.expires_at:
+            raise ExpiredRefreshTokenError()
+
+        user = await self.user_repo.get_by_id(db_token.user_id)
+        if not user:
+            raise InvalidRefreshTokenError()
+
+        # Rotate: revoke the old token and mint a new pair.
+        access_token = create_access_token(subject=user.id)
+        new_plain_refresh_token = secrets.token_urlsafe(32)
+        new_hashed_refresh_token = self._hash_token(new_plain_refresh_token)
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            days=settings.REFRESH_TOKEN_EXPIRE_DAYS
+        )
+
+        try:
+            await self.token_repo.revoke_refresh_token(db_token)
+            await self.token_repo.create_refresh_token(
+                user_id=user.id,
+                token_hash=new_hashed_refresh_token,
+                expires_at=expires_at,
+            )
+            await self.db.commit()
+        except Exception as e:
+            await self.db.rollback()
+            raise e
+
+        return {
+            "access_token": access_token,
+            "refresh_token": new_plain_refresh_token,
+            "token_type": "Bearer",
+            "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        }
+
+    async def logout(
+        self,
+        refresh_token_plain: str,
+        all_sessions: bool = False,
+    ) -> None:
+        """
+        Revokes refresh tokens. The user is identified from the presented
+        refresh token, so no access token is required (a client can log out
+        even after its short-lived access token has expired).
+
+        - The presented token must itself be currently valid (exists, not
+          revoked, not expired); otherwise this is an idempotent no-op. This
+          prevents an old/leaked token from being replayed to disrupt sessions.
+        - all_sessions=True: revoke every active refresh token for that user.
+        - otherwise: revoke only the presented refresh token.
+
+        Always succeeds (idempotent) so it never leaks whether a token exists.
+        """
+        token_hash = self._hash_token(refresh_token_plain)
+        db_token = await self.token_repo.get_refresh_token_by_hash(token_hash)
+
+        # Only act on a currently-valid token; anything else is a silent no-op.
+        if (
+            not db_token
+            or db_token.revoked_at is not None
+            or datetime.now(timezone.utc) > db_token.expires_at
+        ):
+            return
+
+        try:
+            if all_sessions:
+                await self.token_repo.revoke_user_refresh_tokens(db_token.user_id)
+            else:
+                await self.token_repo.revoke_refresh_token(db_token)
+            await self.db.commit()
+        except Exception as e:
+            await self.db.rollback()
+            raise e

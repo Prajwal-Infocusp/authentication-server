@@ -13,6 +13,25 @@ class UserLogin(BaseModel):
         return v.lower()
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(..., min_length=1)
+
+
+class LogoutRequest(BaseModel):
+    """
+    Revoke refresh tokens. The user is identified from the supplied refresh
+    token, so no access token is required. When ``all_sessions`` is true, every
+    active refresh token for that user is revoked; otherwise only the supplied
+    token is revoked.
+    """
+    refresh_token: str = Field(..., min_length=1)
+    all_sessions: bool = False
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str

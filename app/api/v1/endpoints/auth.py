@@ -5,10 +5,23 @@ from app.db.database import get_db
 from app.db.models.user import User
 from app.api.deps import get_current_user
 from app.schemas.user import UserRegister, UserResponse
-from app.schemas.auth import UserLogin, LoginResponse, TokenResponse
+from app.schemas.auth import (
+    UserLogin,
+    LoginResponse,
+    TokenResponse,
+    RefreshRequest,
+    LogoutRequest,
+    MessageResponse,
+)
 from app.schemas.totp import TOTPSetupResponse, TOTPEnableRequest, TOTPVerifyRequest
 from app.services.user import UserService, EmailAlreadyRegisteredError
-from app.services.auth import AuthService, InvalidCredentialsError
+from app.services.auth import (
+    AuthService,
+    InvalidCredentialsError,
+    InvalidRefreshTokenError,
+    ExpiredRefreshTokenError,
+    RevokedRefreshTokenError,
+)
 from app.services.totp import (
     TOTPService,
     MFAAlreadyEnabledError,
@@ -188,3 +201,81 @@ async def verify_2fa(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred during 2FA verification.",
         )
+
+
+@router.post("/refresh", response_model=TokenResponse, status_code=status.HTTP_200_OK)
+async def refresh(
+    payload: RefreshRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Endpoint to exchange a valid refresh token for a new access token.
+    The presented refresh token is rotated (revoked and replaced), so each
+    refresh token can be used only once.
+    """
+    auth_service = AuthService(db)
+    try:
+        tokens = await auth_service.refresh(payload.refresh_token)
+        return tokens
+    except InvalidRefreshTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except RevokedRefreshTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has been revoked. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except ExpiredRefreshTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while refreshing the session.",
+        )
+
+
+@router.post("/logout", response_model=MessageResponse, status_code=status.HTTP_200_OK)
+async def logout(
+    payload: LogoutRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Endpoint to log out by revoking refresh tokens. The user is identified from
+    the supplied refresh token, so no access token is required (this works even
+    after the access token has expired). Revokes only the supplied token by
+    default, or all of the user's active refresh tokens when all_sessions is
+    true. Access tokens are stateless and remain valid until they expire.
+    """
+    auth_service = AuthService(db)
+    try:
+        await auth_service.logout(
+            refresh_token_plain=payload.refresh_token,
+            all_sessions=payload.all_sessions,
+        )
+        if payload.all_sessions:
+            return {"message": "Logged out of all sessions successfully."}
+        return {"message": "Logged out successfully."}
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during logout.",
+        )
+
+
+@router.get("/me", response_model=UserResponse, status_code=status.HTTP_200_OK)
+async def read_current_user(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Endpoint to return the profile of the currently authenticated user,
+    identified by the bearer access token.
+    """
+    return current_user

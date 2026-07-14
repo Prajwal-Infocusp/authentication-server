@@ -24,6 +24,20 @@ class TokenRepository:
         self.db.add(db_token)
         return db_token
 
+    async def get_refresh_token_by_hash(self, token_hash: str) -> RefreshToken | None:
+        """
+        Retrieves a RefreshToken by its SHA-256 hash.
+        """
+        stmt = select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def revoke_refresh_token(self, refresh_token: RefreshToken) -> None:
+        """
+        Revokes a single refresh token by setting revoked_at to the current UTC time.
+        """
+        refresh_token.revoked_at = datetime.now(timezone.utc)
+
     async def create_login_token(
         self, user_id: uuid.UUID, token_hash: str, expires_at: datetime
     ) -> LoginToken:
