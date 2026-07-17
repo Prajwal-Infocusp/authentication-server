@@ -14,6 +14,7 @@ from app.schemas.auth import (
     RefreshRequest,
     LogoutRequest,
     MessageResponse,
+    PasswordChangeRequest,
 )
 from app.schemas.totp import (
     TOTPSetupResponse,
@@ -28,6 +29,7 @@ from app.services.auth import (
     InvalidRefreshTokenError,
     ExpiredRefreshTokenError,
     RevokedRefreshTokenError,
+    SamePasswordError,
 )
 from app.services.totp import (
     TOTPService,
@@ -41,6 +43,7 @@ from app.services.totp import (
     MFANotEnabledError,
     InvalidPasswordError,
     TwoFactorLockedError,
+    TwoFactorCodeRequiredError,
 )
 
 router = APIRouter()
@@ -337,3 +340,58 @@ async def read_current_user(
     identified by the bearer access token.
     """
     return current_user
+
+
+@router.post("/change-password", response_model=TokenResponse, status_code=status.HTTP_200_OK)
+async def change_password(
+    payload: PasswordChangeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Endpoint to change the authenticated user's password. Requires the current
+    password, plus a TOTP code when the user has 2FA enabled. On success all
+    refresh tokens are revoked and a fresh access + refresh pair is returned so
+    the current device stays logged in while other sessions must re-authenticate.
+    """
+    auth_service = AuthService(db)
+    try:
+        tokens = await auth_service.change_password(
+            user=current_user,
+            current_password=payload.current_password,
+            new_password=payload.new_password,
+            code=payload.code,
+        )
+        return tokens
+    except InvalidPasswordError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect.",
+        )
+    except TwoFactorCodeRequiredError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Two-factor authentication code is required.",
+        )
+    except TwoFactorLockedError as exc:
+        retry_after = max(1, int((exc.locked_until - datetime.now(timezone.utc)).total_seconds()))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    except InvalidTOTPCodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid two-factor authentication code.",
+        )
+    except SamePasswordError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from the current password.",
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while changing the password.",
+        )

@@ -89,6 +89,14 @@ class TwoFactorLockedError(Exception):
         super().__init__("Two-factor authentication is temporarily locked.")
 
 
+class TwoFactorCodeRequiredError(Exception):
+    """
+    Raised when a TOTP code is required (the user has 2FA enabled) but none
+    was supplied for a sensitive action.
+    """
+    pass
+
+
 class TOTPService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -256,25 +264,22 @@ class TOTPService:
             "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         }
 
-    async def disable_2fa(self, user: User, password: str, code: str) -> None:
+    async def verify_totp_with_lockout(self, user: User, code: str) -> None:
         """
-        Disables 2FA for a user after a step-up re-verification:
-        1. Confirm 2FA is currently enabled.
-        2. Confirm the account password.
-        3. Enforce the failed-attempt lockout (brute-force protection).
-        4. Verify the TOTP code:
-           - On failure: record the attempt (with time-decay of stale
-             failures) and lock the action once the cap is reached.
-           - On success: reset the attempt counter, clear the TOTP secret,
-             flip is_2fa_enabled off, remove any pending setup, and revoke all
-             refresh tokens (symmetric with enabling 2FA).
+        Verifies a user's TOTP code with per-account brute-force protection,
+        shared across every sensitive action that checks the second factor
+        (2FA disable, password change, ...). Because all of those flows verify
+        the SAME TOTP secret, one per-user attempt counter caps the TOTAL number
+        of guesses against the account - tighter than a per-action cap, which
+        would just multiply an attacker's allowance by the number of endpoints.
+
+        Behaviour:
+        - Raises TwoFactorLockedError if currently locked, or once this failure
+          trips the threshold (the failed attempt is committed first).
+        - Raises InvalidTOTPCodeError on a wrong code below the threshold.
+        - On success, resets the counter in memory only; the caller commits as
+          part of its own transaction.
         """
-        if not user.is_2fa_enabled:
-            raise MFANotEnabledError()
-
-        if not verify_password(password, user.password_hash):
-            raise InvalidPasswordError()
-
         now = datetime.now(timezone.utc)
         window = timedelta(minutes=settings.MFA_DISABLE_LOCKOUT_MINUTES)
         attempt = await self.token_repo.get_two_factor_attempt(user.id)
@@ -283,38 +288,57 @@ class TOTPService:
         if attempt and attempt.locked_until and attempt.locked_until > now:
             raise TwoFactorLockedError(attempt.locked_until)
 
-        code_ok = bool(user.totp_secret) and pyotp.TOTP(user.totp_secret).verify(code)
-
-        if not code_ok:
-            if attempt is None:
-                attempt = await self.token_repo.create_two_factor_attempt(user.id)
-
-            # Time-decay: forget failures older than the window before counting.
-            if attempt.last_failed_at is None or (now - attempt.last_failed_at) > window:
+        if bool(user.totp_secret) and pyotp.TOTP(user.totp_secret).verify(code):
+            # Success: clear any accumulated failures (caller commits).
+            if attempt:
                 attempt.failed_attempts = 0
+                attempt.locked_until = None
+                attempt.last_failed_at = None
+            return
 
-            attempt.failed_attempts += 1
-            attempt.last_failed_at = now
+        # Failure: record with time-decay of stale failures; lock if over cap.
+        if attempt is None:
+            attempt = await self.token_repo.create_two_factor_attempt(user.id)
 
-            newly_locked = attempt.failed_attempts >= settings.MFA_DISABLE_MAX_ATTEMPTS
-            if newly_locked:
-                attempt.locked_until = now + window
-
-            try:
-                await self.db.commit()
-            except Exception as e:
-                await self.db.rollback()
-                raise e
-
-            if newly_locked:
-                raise TwoFactorLockedError(attempt.locked_until)
-            raise InvalidTOTPCodeError()
-
-        # Success: reset the counter and disable 2FA.
-        if attempt:
+        if attempt.last_failed_at is None or (now - attempt.last_failed_at) > window:
             attempt.failed_attempts = 0
-            attempt.locked_until = None
-            attempt.last_failed_at = None
+
+        attempt.failed_attempts += 1
+        attempt.last_failed_at = now
+
+        newly_locked = attempt.failed_attempts >= settings.MFA_DISABLE_MAX_ATTEMPTS
+        if newly_locked:
+            attempt.locked_until = now + window
+
+        try:
+            await self.db.commit()
+        except Exception as e:
+            await self.db.rollback()
+            raise e
+
+        if newly_locked:
+            raise TwoFactorLockedError(attempt.locked_until)
+        raise InvalidTOTPCodeError()
+
+    async def disable_2fa(self, user: User, password: str, code: str) -> None:
+        """
+        Disables 2FA for a user after a step-up re-verification:
+        1. Confirm 2FA is currently enabled.
+        2. Confirm the account password.
+        3. Verify the TOTP code (with shared brute-force lockout).
+        4. On success: clear the TOTP secret, flip is_2fa_enabled off, remove
+           any pending setup, and revoke all refresh tokens (symmetric with
+           enabling 2FA).
+        """
+        if not user.is_2fa_enabled:
+            raise MFANotEnabledError()
+
+        if not verify_password(password, user.password_hash):
+            raise InvalidPasswordError()
+
+        # Verify TOTP with lockout; resets the attempt counter in memory on
+        # success and lets this method commit everything together.
+        await self.verify_totp_with_lockout(user, code)
 
         user.is_2fa_enabled = False
         user.totp_secret = None

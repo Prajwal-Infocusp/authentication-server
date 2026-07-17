@@ -5,6 +5,32 @@ from pydantic import BaseModel, EmailStr, Field, field_validator, ConfigDict
 from pydantic_core import PydanticCustomError
 
 
+def validate_password_strength(v: str) -> str:
+    """
+    Shared password-strength check: at least one uppercase, lowercase, digit,
+    and special character. Reused by every schema that accepts a password
+    (registration, password change, ...). Length limits are enforced via the
+    Field(min_length=8, max_length=128) constraint on each password field.
+    """
+    if not re.search(r"[A-Z]", v):
+        raise PydanticCustomError(
+            "value_error", "Password must contain at least one uppercase letter."
+        )
+    if not re.search(r"[a-z]", v):
+        raise PydanticCustomError(
+            "value_error", "Password must contain at least one lowercase letter."
+        )
+    if not re.search(r"\d", v):
+        raise PydanticCustomError(
+            "value_error", "Password must contain at least one digit."
+        )
+    if not re.search(r"[^A-Za-z0-9]", v):
+        raise PydanticCustomError(
+            "value_error", "Password must contain at least one special character."
+        )
+    return v
+
+
 class UserRegister(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     email: EmailStr
@@ -34,24 +60,8 @@ class UserRegister(BaseModel):
 
     @field_validator("password")
     @classmethod
-    def validate_password_strength(cls, v: str) -> str:
-        if not re.search(r"[A-Z]", v):
-            raise PydanticCustomError(
-                "value_error", "Password must contain at least one uppercase letter."
-            )
-        if not re.search(r"[a-z]", v):
-            raise PydanticCustomError(
-                "value_error", "Password must contain at least one lowercase letter."
-            )
-        if not re.search(r"\d", v):
-            raise PydanticCustomError(
-                "value_error", "Password must contain at least one digit."
-            )
-        if not re.search(r"[^A-Za-z0-9]", v):
-            raise PydanticCustomError(
-                "value_error", "Password must contain at least one special character."
-            )
-        return v
+    def _check_password_strength(cls, v: str) -> str:
+        return validate_password_strength(v)
 
 
 class UserResponse(BaseModel):

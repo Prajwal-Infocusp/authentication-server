@@ -7,8 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.settings import settings
 from app.db.repositories.user import UserRepository
 from app.db.repositories.token import TokenRepository
-from app.security.password import verify_password
+from app.security.password import verify_password, hash_password
 from app.security.jwt import create_access_token
+from app.services.totp import (
+    TOTPService,
+    InvalidPasswordError,
+    TwoFactorCodeRequiredError,
+)
 
 
 class InvalidCredentialsError(Exception):
@@ -36,6 +41,13 @@ class RevokedRefreshTokenError(Exception):
     """
     Raised when a refresh token has already been revoked (e.g. rotated out,
     logged out, or invalidated when 2FA was enabled).
+    """
+    pass
+
+
+class SamePasswordError(Exception):
+    """
+    Raised when a password change reuses the current password.
     """
     pass
 
@@ -217,3 +229,63 @@ class AuthService:
         except Exception as e:
             await self.db.rollback()
             raise e
+
+    async def change_password(
+        self,
+        user,
+        current_password: str,
+        new_password: str,
+        code: str | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Changes the authenticated user's password after a step-up re-verification:
+        1. Confirm the current password.
+        2. If 2FA is enabled, require and verify a TOTP code (shared lockout).
+        3. Reject if the new password equals the current one.
+        4. Hash and store the new password.
+        5. Revoke ALL refresh tokens (security-state change), then issue a fresh
+           access + refresh pair so the current device stays logged in while
+           every other session is forced to re-authenticate.
+        """
+        if not verify_password(current_password, user.password_hash):
+            raise InvalidPasswordError()
+
+        if user.is_2fa_enabled:
+            if not code:
+                raise TwoFactorCodeRequiredError()
+            totp_service = TOTPService(self.db)
+            # Raises InvalidTOTPCodeError / TwoFactorLockedError on failure;
+            # resets the shared attempt counter in memory on success.
+            await totp_service.verify_totp_with_lockout(user, code)
+
+        if new_password == current_password:
+            raise SamePasswordError()
+
+        user.password_hash = hash_password(new_password)
+
+        access_token = create_access_token(subject=user.id)
+        plain_refresh_token = secrets.token_urlsafe(32)
+        hashed_refresh_token = self._hash_token(plain_refresh_token)
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            days=settings.REFRESH_TOKEN_EXPIRE_DAYS
+        )
+
+        try:
+            # Revoke first, then create the new token so it survives the sweep.
+            await self.token_repo.revoke_user_refresh_tokens(user.id)
+            await self.token_repo.create_refresh_token(
+                user_id=user.id,
+                token_hash=hashed_refresh_token,
+                expires_at=expires_at,
+            )
+            await self.db.commit()
+        except Exception as e:
+            await self.db.rollback()
+            raise e
+
+        return {
+            "access_token": access_token,
+            "refresh_token": plain_refresh_token,
+            "token_type": "Bearer",
+            "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        }
